@@ -1,0 +1,107 @@
+#!/usr/bin/perl
+
+# This script is intended to automatically sync code from our orgin repo onto
+# target QA servers.  There is absolutely no reason this could not also be used
+# in a production environment, with the exception that deploys to checked out references
+# would be immediately available.  This is not always desireable.
+#
+# This script should not be directly invoked; instead it is called by the post-receive
+# hook in a git repo.
+#
+# To activate changes on target repos, the right reference needs to be checked out. 
+#
+use strict;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Sandbox;
+use Data::Dumper;
+use Try::Tiny;
+
+# quick and dirty, list of targets.  This could be moved to a config file.
+our @DeployTargets = qw{
+	q0.glip.net
+};
+our $DeployAccount = 'web';
+our $SrcTop        = '/g/src/ec';
+our $LogFile       = '/var/log/sb-deploy-to-qa.log';
+
+# These are normally set by environment variables; probably not the best way
+# to set values here, but can fix once we have consistent user names across
+# instances
+$Sandbox::Project    = 'GLIP';
+$Sandbox::JiraHost   = 'glipdev.atlassian.net';
+$Sandbox::JiraApiUri = "https://glipdev.atlassian.net/rest/api/latest";
+
+our $qa_release_target = Sandbox->current_release_id;
+log_message('I', "Current release is >$qa_release_target<");
+
+# STDIN comes from a git hook; each line represents a group of commits on a ref.
+# The format of the line is "oldref newref refname."  For our purposes, refname gets
+# pushed to our targets
+while(<STDIN>) {
+    print LOG $_;
+    chomp;
+    my ($oldref, $newref, $refname) = split(/ /);
+	my ($short_refname) = ($refname =~ m{^.*/(.*)$});
+
+	next unless $short_refname eq $qa_release_target;
+
+	# get commit log messages
+	log_message('I', "Getting commit messages from $oldref to $newref");
+	my @git_log = `git log --pretty='%h|%cn|%cd|%d|%s|%b' $oldref..$newref`;
+	chomp(@git_log);
+
+	# sort throught the logs looking for commits that include references to
+	# jira tickets
+	my $issues_to_update = {};
+	foreach my $commit (@git_log) {
+		log_message('I', "Processing commit >$commit<");
+		my ($id, $name, $date, $ref_names, $subject, $body) = split(/\|/, $commit);
+		$subject =~ s/($Sandbox::Project-\d+)\:\s*/
+			push @{$issues_to_update->{$1}}, $commit;
+			''
+		/se;
+	}
+
+	# iterate over our deployment targets and push out the code
+    foreach my $target (@DeployTargets) {
+		my $command = "git push ssh://$DeployAccount\@$target$SrcTop $refname";
+		log_message('I', "pushing repo to $target with: $command");
+		my $results = `$command`;
+		if ($?) {
+			my $error = "Could not push to $target: $results $@";
+			log_message('E', $error);
+			die $error;
+		}
+		log_message('S', "Pushed $refname to $target");
+	}
+
+	# auto close the issues we are working on 
+	foreach my $issue (keys %$issues_to_update) {
+		try {
+			Sandbox->issue_ready_for_qa($issue, $issues_to_update->{$issue});
+		}
+		catch {
+			log_message('E', $_);
+			warn $_;
+		}
+	}
+}
+
+sub log_message {
+	my ($type, $message) = @_;
+	open(LOG, ">>$LogFile");
+	print LOG join(' ', timestamp(), $type, $message) . "\n";
+}
+
+sub timestamp {
+	my $time = shift || time;
+	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime($time);
+	$sec  = "0$sec"  if length($sec)  < 2;
+	$min  = "0$min"  if length($min)  < 2;
+	$hour = "0$hour" if length($hour) < 2;
+	$mday = "0$mday" if length($mday) < 2;
+	$mon  = "0$mon"  if length($mon)  < 2;
+	$year += 1900;
+	return "$year-$mon-$mday $hour:$min:$sec";
+}

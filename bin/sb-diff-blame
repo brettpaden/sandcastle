@@ -1,0 +1,168 @@
+#!/usr/bin/perl
+
+use strict;
+use Data::Dumper;
+use HTML::Entities;
+
+our $FisheyeURL = 'https://devtools.multiplycorp.com/fisheye/changelog/Multiply?cs=';
+
+my $diff_file = shift;
+
+my $current_branch;
+my $current_file;
+my $current_index_start;
+my $current_index_end;
+my $current_index_mode;
+my $diffs = {};
+my @files = ();
+my @blame_data = ();
+my @diff_chunk = ();
+my $new_files = {};
+my $new_file;
+
+open(DIFF, $diff_file);
+while(<DIFF>) {
+	chomp;
+    next if /^--- /;
+    next if /^\+\+\+ /;
+
+	if (m{^diff --git a/(.*) b/(.*)$}) {
+		update_diffs();
+		$current_file = $1;
+		push @files, $current_file;
+	}
+	elsif (m{index (.*)\.\.(.*) (\d+)}) {
+		$current_index_start = $1;
+		$current_index_end   = $2;
+		$current_index_mode  = $3;
+	}
+    elsif (s{^@@ (.*?) @@ }{}) {
+		update_diffs();
+		my $change_range = $1;
+        my ($blame_range) = ($change_range =~ m{ \+(\d+\,\d+)});
+        if (not $blame_range) {
+	    	($blame_range) = ($change_range =~ m{ \+(\d)});
+        }
+        $blame_range =~ s{\,}{\,+};
+		@blame_data = generate_blame_chunk("-L $blame_range $current_file");
+	}
+	else {
+		push @diff_chunk, $_;
+	}
+#    elsif (/^Contents of new (.*):/) {
+#        update_diffs();
+#		$current_file = $1;
+#        push @files, $1;
+#	@blame_data = generate_blame_chunk("$current_file");
+#	$new_files->{$current_file}++;
+#	$new_file++;
+#    }
+#    elsif (/^Diff of (.*):/) {
+#        update_diffs();
+#	$current_file = $1;
+#        push @files, $1;
+#        # uncomment line below to debug
+#	# last if @files > 10;
+#    }
+#        update_diffs();
+#    }
+#    elsif ($new_file) {
+#        push @diff_chunk, "+$_";
+#    }
+#    else {
+#        push @diff_chunk, $_;
+#    }
+}
+
+sub generate_blame_chunk {
+    my $command = shift;
+    my @blame = `git blame $command`;
+    my @data = map {
+        my ($sha, $author_name, $date, $line_number, $code) = /(........) \((.*?)\s+(\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d .\d\d\d\d)\s+(\d+)\) (.*)/;
+	{ sha =>  $sha, author => $author_name, date => $date, line_number => $line_number, code => $code };
+    } @blame;
+    return @data;
+}
+
+sub update_diffs {
+    my @blame = @blame_data;
+    my @diff = @diff_chunk;
+    if (@diff) {
+		push @{$diffs->{$current_file}}, {
+			blame => \@blame,
+			diff  => \@diff,
+		};
+    }
+    $new_file = undef;
+    @blame_data = ();
+    @diff_chunk = ();
+}
+
+use Data::Dumper;
+#die Dumper $diffs;
+
+my $authors_by_file = {};
+my $body_html;
+my $file_id = 1;
+foreach my $file (@files) {
+    my $new = $new_files->{$file} ? ' (NEW)' : '';
+    $body_html .= "<a name=$file_id><h3>$file$new</h3></a>";
+    $body_html .= "<pre>\n";
+    $file_id++;
+    foreach my $chunk (@{$diffs->{$file}}) {
+	my @blame = @{$chunk->{blame}};
+	foreach my $line (@{$chunk->{diff}}) {
+            # strip out the change type so we can colorize as well as compare to our git blame
+	    $line =~ s{^([\+\- ])}{};
+	    my $change = $1;
+	    $line =~ s/\n//;
+
+            # the next next line in our git blame for this diff matches the diff line, we can
+	    # display other details like the author, sha and line number in new code
+	    my ($author, $line_number, $sha);
+	    if ($line eq $blame[0]->{code}) {
+		my $blame = shift @blame;
+		$line_number = $blame[0]->{line_number} ? "$blame[0]->{line_number})" : '';
+		$author = $blame->{author};
+		$sha = $blame->{sha};
+	    }
+
+            # format our contents for a nice display; be sure to escape that code!
+	    my $print_author = pack('A20', $author);
+	    my $print_line_number = pack('A6', $line_number);
+	    $line = HTML::Entities::encode_entities($line);
+	    $sha = $sha ? "<a href=$FisheyeURL$sha target=fisheye>$sha</a>" : '        ';
+	    my $content = "$print_author $sha $print_line_number $change$line";
+
+	    # nice colorization
+	    if ($change eq '+') {
+		$authors_by_file->{$file}->{$author}++ if $author;
+		$body_html .= "<font color=green><b>$content</b></font>";
+	    }
+	    elsif ($change eq '-') {
+		$body_html .= "<font color=red><b>$content</b></font>";
+	    }
+	    else {
+		$body_html .= "$content";
+	    }
+	    $body_html .= "\n";
+	}
+	$body_html .= "<br><hr><br>\n";
+    }
+    $body_html .= "</pre>";
+}
+
+my $header_html = "<table>";
+my $file_id = 1;
+foreach my $file (@files) {
+    my @authors = sort keys %{$authors_by_file->{$file}};
+    my $author_string = join(", ", @authors);
+    my $new = $new_files->{$file} ? ' (NEW)' : '';
+    $header_html .= "<tr><td><a href=#$file_id>$file$new</td><td width=10px>&nbsp;</td><td>$author_string</td></tr>\n";
+    $file_id++;
+}
+$header_html .= "</table>";
+
+print "<h2>Diff bewteen production and $current_branch</h2>";
+print "$header_html\n$body_html";
+

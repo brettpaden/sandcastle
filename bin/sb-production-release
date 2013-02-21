@@ -1,0 +1,8 @@
+#!/usr/bin/perl
+
+use strict;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Sandbox;
+
+print Sandbox->production_release_id . "\n";

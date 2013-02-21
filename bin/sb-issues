@@ -1,0 +1,28 @@
+#!/usr/bin/perl
+
+use strict;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Sandbox;
+use Getopt::Declare;
+use Data::Dumper;
+use URI::Escape;
+
+my $issue_key = shift;
+
+if ($issue_key) {
+	my $issue = Sandbox->jira_issue($issue_key);
+	print $issue->pretty;
+}
+else {
+	my @table = (['Id','Priority','Summary']);
+	foreach my $issue (Sandbox->my_issues()) {;
+		push @table,[
+			$issue->key,
+			$issue->priority,
+			$issue->summary,
+		];
+	}
+	print Sandbox->ascii_table(@table);
+}

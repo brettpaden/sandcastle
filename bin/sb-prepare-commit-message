@@ -1,0 +1,35 @@
+#!/usr/bin/perl
+
+# this script is used to edit git commit messsages via the git pre-commit-msg hook.  The
+# intention here is to format the commit messages such that the name of the branch, which
+# *should* be the name of the jira issue, is prepended to the commit message.
+use strict;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Sandbox;
+
+my $commit_message_file = shift;
+my $commit_message_desc = shift;
+
+my $message = `cat $commit_message_file`;
+
+my ($issue_key) = ($message =~ m{^($Sandbox::Project-\d+):});
+if (Sandbox->is_issue_system_tracked_branch) {
+	$issue_key = Sandbox->issue_from_branch;
+}
+
+if ($issue_key) {
+	my $issue = Sandbox->jira_issue($issue_key);
+	`mv $commit_message_file $commit_message_file.tmp`;
+	open(MSG,">$commit_message_file");
+	print MSG "$issue_key: [" . $issue->summary . "]\n$message";
+	close MSG;
+}
+else {
+	print "Your commit message was not prepended with an ISSUE-ID: and will not be automatically tracked\n";
+}
+
+# cleanup
+unlink "$commit_message_file.tmp";
+
+# there is nothing to return as git just picks up the file we edited

@@ -1,0 +1,84 @@
+#!/usr/bin/perl
+#
+use strict;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Sandbox;
+use Data::Dumper;
+use Try::Tiny;
+
+my $bucket    = Sandbox->cloudfront_bucket;
+my $basehttp  = Sandbox->cloudfront_http;
+my $basehttps = Sandbox->cloudfront_https;
+my $s3cmd     = Sandbox->s3cmd;
+
+# this will be a list of files to be shown, then deployed
+my @add_files = ();
+# this will be a list of files to delete
+my @delete_files = ();
+
+# first parse the input passed from the hook
+#
+while(<STDIN>) {
+    print LOG $_;
+    chomp;
+    my ($oldref, $newref, $refname) = split(/ /);
+	my @diff_files = `git diff --name-status $oldref..$newref`;
+	chomp(@diff_files);
+	foreach my $diff_file (@diff_files) {
+		my ($status, $file) = split(/\t/, $diff_file);
+        if ($status eq 'A') {
+			push @add_files, $file;
+		}
+		elsif ($status eq 'D') {
+			push @delete_files, $file;
+		}
+		else {
+			my $message = "NOT DELETE OR ADD: $file has a status of >$status< and will not be pushed to cdn";
+			print STDERR "$message\n";
+		}
+	}
+}
+# next do a git show to put the file in a tmp spot, then use s3cmd to push to our cdn bucket
+# git show file > /tmp/location
+foreach my $add_file (@add_files) {
+	my $tmp_file = "/tmp/upload.$$";
+	my $show_command = "git show 'master:$add_file' >> $tmp_file";
+	my $results = `$show_command`;
+	if ($?) {
+		my $message = "Unable to extract $add_file from git repo: $show_command $results $@";
+		warn $message;
+	}
+	else {
+		my $mime_type = `file -b --mime-type $tmp_file`;
+		chomp $mime_type;
+		if ($? || !$mime_type) {
+			warn "Unable to determine mime-type for $add_file";
+		}
+		my $s3putcmd = "$s3cmd put --acl-public -m $mime_type $tmp_file $bucket$add_file";
+		my $results = `$s3putcmd`;
+		if ($?) {
+			my $message = "s3cmd failed: $s3putcmd $results $@";
+			warn $message;
+		}
+		else {
+			# git can be gay --- only way to get messages back to git client is STDERR
+			print STDERR "A $basehttp/$add_file\n";
+			print STDERR "A $basehttps/$add_file\n";
+		}
+	}
+
+}
+
+foreach my $delete_file (@delete_files) {
+	my $delete_command = "$s3cmd del $bucket$delete_file";
+	my $results = `$delete_command`;
+	if ($?) {
+		my $message = "s3cmd failed: $delete_command $results $@";
+		warn $message;
+	}
+	else {
+		print STDERR "D $basehttps/$delete_file\n";
+		print STDERR "D $basehttp/$delete_file\n";
+	}
+}

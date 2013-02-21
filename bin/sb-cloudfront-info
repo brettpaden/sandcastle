@@ -1,0 +1,10 @@
+#!/usr/bin/perl
+
+use strict;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Sandbox;
+
+print Sandbox->cloudfront_http   . "\n";
+print Sandbox->cloudfront_https  . "\n";
+print Sandbox->cloudfront_bucket . "\n";

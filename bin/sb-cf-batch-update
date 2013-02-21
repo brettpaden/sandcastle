@@ -1,0 +1,34 @@
+#!/usr/bin/perl
+#
+use strict;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use File::Find;
+use Sandbox;
+
+my $dir = "$ENV{SRCTOP}/static";
+my $s3cmd = Sandbox->s3cmd;
+my $bucket = Sandbox->cloudfront_bucket;
+my $http = Sandbox->cloudfront_http;
+
+find({ wanted => \&wanted }, $dir);
+
+sub wanted {
+	return if m{^\.};
+    return if $File::Find::dir =~ m{/\.};
+	return if -d $File::Find::name;
+	my ($file) = ($File::Find::name =~ m{$File::Find::topdir/(.*)});
+	my $mime_type = `file -b --mime-type $File::Find::name`;
+	chomp $mime_type;
+	my $timestamp = time;
+	print "$file\n";
+	my $put_command = "$s3cmd --acl-public -m $mime_type --add-header=Content-Type:$mime_type --add-header=X-Added-Timestamp:$timestamp put $File::Find::name $bucket$file";
+	`$put_command`;
+	#my $check_command = "curl -s -D- -o/dev/null $http/$file | grep Content-Type";
+	#print `$check_command`;
+
+}
+
+
+
+

@@ -1,0 +1,54 @@
+#!/usr/bin/perl
+
+use strict;
+
+# pre commit hook for the static project; prevents any files from being 
+# modified.  This repo is for static, mostly binary, files.
+#
+# To skip this check and earn the wrath of Paden, run your commit:
+#
+# git commit --no-verify -a -m message 
+
+# git the status of the repo, porcelain is machine readable
+my @status = `git status --porcelain`;
+chomp @status;
+
+my $fail;
+foreach (@status) {
+	my ($index_status, $worktree_status, $files) = m{^(.)(.) (.*)$};
+
+	# handle wonky formatting for files that have been renamed; in all 
+	# other scenarios there will be one file per status line
+	my @files = split(/ -> /, $files);
+	@files = reverse @files if @files > 1;
+	my ($dest_file, $orig_file) = @files;
+
+	# M status means modified; not allowed
+	if ($index_status eq 'M' || $worktree_status eq 'M') {
+		$fail++;
+		print "$dest_file was modified\n";
+	}
+	# U means unmerged changes, which also indicate exiting file modification
+	elsif ($index_status eq 'U' || $worktree_status eq 'U') {
+		$fail++;
+		print "$dest_file is unmerged, indicating modification\n";
+	}
+	# R means renamed; might be ok but probably not
+	elsif ($index_status eq 'R') {
+		$fail++;
+		print "$dest_file was renamed from $orig_file.  This could be bad; a new file ";
+		print "with the old name might be reintroduced down the line.  Use --no-verify ";
+		print "if you are sure about what you are doing\n";
+	}
+	# D means delete; give a warning
+	elsif ($index_status eq 'D' || $worktree_status eq 'D') {
+		print "WARNING!!  Pushing a delete will remove the file from the CDN.  Is this really what you want??\n";
+	}
+}
+
+if ($fail) {
+    print "COMMIT REJECTED\n";
+	exit(1);
+}
+
+exit(0);

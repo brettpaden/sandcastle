@@ -1,0 +1,129 @@
+#!/usr/bin/perl
+
+use strict;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Sandbox;
+use Getopt::Declare;
+
+my $commit_message = shift;
+
+# FIXME
+# We need to collect some command line information to make decisions 
+# about what to do in the following edge conditions:
+#
+# 1) a non-named branch commit to the production release needs a cherry 
+#    pick commit range. The default behavior right now is to simply assum 
+#    the LAST commit made is the hotfix.  This is a good assumption, but 
+#    still an assumption
+# 2) for the commit message
+# 3) for named branches that are not issue tracked, we will need to 
+#    know which branch the code should be merged into.  The default behavior 
+#    now is to merge it with the current_release
+
+Sandbox->root; # make sure we're in a sandbox directory 
+
+# make sure we are working in a clean branch
+if (!$commit_message) {
+	my $git_status = `git status -sb`;
+	my @status_lines = split /\n/, $git_status;
+	die 'Must commit all changes first!' unless scalar @status_lines == 1;
+}
+
+# we will need the branch ids 
+our $Branch = Sandbox->current_branch;
+my $current_release_id    = Sandbox->current_release_id;
+my $production_release_id = Sandbox->production_release_id;
+
+# commit; a git hook will format the message for us to handle out of
+# band commits
+Sandbox->print_and_run('git','add','--all');
+system('git', 'commit', '-a', '-m', $commit_message);
+
+# if we are on a on the current_release, just push and be done
+if ($Branch eq $current_release_id) {
+	Sandbox->print_and_run('git', 'pull', 'origin', $Branch);
+	Sandbox->print_and_run('git', 'push', 'origin', $Branch);
+	exit(0);
+}
+
+# if we are on the production branch we need to cherry pick our commits and 
+# attempt to apply them to the current branch as well
+if ($Branch eq $production_release_id) {
+	print "You will need to deploy your changes to production outside this process\n";
+	# get the range of commit ids to cherry pick commits into master repo
+	my $commit_id = `git log -n1 --pretty=format:'%h'`;
+	checkout_pull_cherrypick_push($current_release_id, $commit_id);
+	exit(0);
+}
+
+# if this is a hotfix, we want to cherrypick the commits we have made to the production
+# branch, create a new development branch from current_release and apply those changes,
+# then merge back with the development branch
+if ($Branch =~ m{^($Sandbox::Project-\d+)-(.*?)-hotfix}) {
+	my $base_branch = $1;
+	my $branched_from = $2;
+
+	die "This hotfix does not appear to apply to the current release branch!" 
+	    if Sanbox->is_not_current_release($branched_from);
+
+	# get the range of commit ids to cherry pick commits into master repo
+	my $commit_ids = `git log $production_release_id..$Branch --pretty=format:'%h'`;
+ 
+    # merge with production branch, and push up to the origin.
+	checkout_pull_merge_push($production_release_id, $Branch);
+
+    # now cherry pick our commits and create branch from the current replease repo that we can
+	# apply those changes to, and subsequently apply to the next release 
+    Sandbox->print_and_run('sb-branch', $base_branch);
+    my @commit_arr = split(/\n/, $commit_ids);
+    chomp @commit_arr;
+    my $commit_id = join ' ',reverse(@commit_arr);
+    Sandbox->print_and_run('git', 'cherry-pick', $commit_id);
+    Sandbox->print_and_run('git','push','origin', $base_branch);
+	
+	# reassign so we can apply the changes to the current release branch
+	$Branch = $base_branch;
+}
+
+# apply changes to current release (QA)
+checkout_pull_merge_push($current_release_id, $Branch);
+
+# checkout, pull, merge, push
+sub checkout_pull_merge_push {
+	my ($target_branch, $merge_branch) = @_;
+
+    # checkout to the target branch, pull from the origin
+	Sandbox->print_and_run('git', 'checkout', $target_branch);
+	Sandbox->print_and_run('git', 'pull', 'origin', $target_branch);
+
+    # merge
+	my $merge_command = "git merge $merge_branch";
+	my $results = `$merge_command`;
+
+	print $results."\n";
+
+	if ($?) {
+		die <<EOF;
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+Could not merge $merge_branch into $target_branch.  You will need to take the 
+following steps:
+
+<<resolve conflicts>>
+git commit -a (use default commit message)
+git push origin $target_branch
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+EOF
+	}
+
+	# All looks good, push to the origin
+	Sandbox->print_and_run('git', 'push', 'origin', $target_branch);
+}
+
+sub checkout_pull_cherrypick_push {
+	my ($branch, $commit_id) = @_;
+	Sandbox->print_and_run('git', 'checkout', $branch);
+	Sandbox->print_and_run('git', 'pull', 'origin', $branch);
+    Sandbox->print_and_run('git', 'cherry-pick', $commit_id);
+	Sandbox->print_and_run('git', 'push', 'origin', $branch);
+}

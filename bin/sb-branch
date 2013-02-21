@@ -1,0 +1,196 @@
+#!/usr/bin/perl
+
+use strict;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Sandbox;
+use Getopt::Declare;
+use Data::Dumper;
+use Text::Wrap;
+
+## force flush (for reading passwords ...)
+$| = 1;
+
+our $BranchFrom;
+our $ForceOpen;
+our $Branch;
+our $DisplayWidth = 80;
+
+## Default width of for display contents
+$Text::Wrap::columns = $DisplayWidth;
+
+## stuff for creating an issue
+our $CreateIssue;
+our $CreateIssueInteractive;
+our $CreateIssue_Params = {};
+
+my $specification = q(
+Description:
+  sb-branch creates an issue branch off of the Git master branch (or the
+  current production/qa release branches) to facilitate per-issue branching as
+  tracked in JIRA.
+
+  Additionally, sb-branch performs sanity checks to ensure that the user has
+  the latest codebase, that a corresponding JIRA issue exists, and that the
+  JIRA issue is currently 'open'. Alternatively, allows the developer to create
+  a JIRA issue from the command line if so desired.
+
+Examples:
+  -- create a branch for JIRA issue MUL-13584
+  cd ~/src
+  sb-branch MUL-13584
+
+   -- create a JIRA issue and then branch
+   cd ~/src
+   sb-branch -c -m 'Accounting Issue' -d 'Accounting issue description'
+
+   -- create a hotfix for production, ignoring the status of the corresponding
+   -- JIRA issue
+   cd ~/src
+   sb-branch -s prod -F MUL-13588
+
+   -- more advanced entry:
+   cd ~/src
+   sb-branch -c -m 'test issue creation' -d 'test description' -t task -p blocker -o cs -g paden -u 'http://www.yahoo.com/' -i kenshaw -e dope
+
+Parameters:
+  -c				Create a JIRA issue prior to branching
+ 	 				{ $::CreateIssue = 1; }
+  -I				Create issue in fully interactive mode with menus for all options
+ 	 				{ $::CreateIssueInteractive = 1; }
+  -m <msg>			When creating an issue, the Summary of the issue
+	  				{ $::CreateIssue_Params->{summary} = $msg; }
+  -d <desc>			When creating an issue, the Description of the issue
+	  				{ $::CreateIssue_Params->{description} = $desc; }
+  -t <type>			When creating an issue, the Type of the issue (default: Bug)
+	  				{ $::CreateIssue_Params->{issue_type} = $type; }
+  -p <priority>		When creating an issue, the Priority of the issue (default: Minor)
+  					{ $::CreateIssue_Params->{priority} = $priority; }
+  -o <component>	When creating an issue, a Component to assign the issue (default: other)
+  					{ $::CreateIssue_Params->{component} = $component; }
+  -g <assignee>		When creating an issue, the Assignee of the issue (default: the current user)
+  					{ $::CreateIssue_Params->{assignee} = $assignee; }
+  -u <url>			When creating an issue, the related URL of the issue
+  					{ $::CreateIssue_Params->{url} = $url; }
+  -i <id>			When creating an issue, the related Multiply User ID for the issue (default: n/a)
+  					{ $::CreateIssue_Params->{id} = $id; }
+  -e <env>			When creating an issue, the Multiply Environment, ie: prod, qa, dev, dope (default: prod)
+  					{ $::CreateIssue_Params->{environment} = $env; }
+  -a <version>		When creating an issue, the Affects Version (default: most recently closed version)
+  					{ $::CreateIssue_Params->{affects_verion} = $version; }
+  -f <version>		When creating an issue, the Fix Version (default: current release version)
+  					{ $::CreateIssue_Params->{fix_version} = $version; }
+  -s <source>		Source branch from which to create your branch (default: master)
+  					{ $::BranchFrom = $source }
+  -F				Ignore the issue resolution, even if the issue is marked as resolved/verified/closed
+  					{ $::ForceOpen = 1; }
+  <branch>			Name of branch. Can be any existing JIRA issue or one of key words 'qa' or 'prod' -- not needed if an issue is being created
+  					{ $::Branch = $branch; }
+);
+my $args = Getopt::Declare->new($specification);
+
+Sandbox->root; # make sure we're in a sandbox directory 
+#die "Creating issues not supported yet" if $CreateIssue;
+
+# make sure we have a valid JIRA issue or qa/prod branch specified, or we have specified to create an issue
+print "Because your branch is not named after a JIRA issue, it will not be automatically tracked\n\n" if $Branch !~ m/^($Sandbox::Project-[0-9]+|qa|prod)$/ && !$CreateIssue;
+
+# do a quick check to make sure there aren't any uncommitted changes in the current branch
+my $git_status = `git status --porcelain`;
+die "Error: there are uncommitted changes in the current branch. Please commit your changes and try again." if $? || $git_status;
+
+# real branch ids
+my $current_release_id    = Sandbox->current_release_id;
+my $production_release_id = Sandbox->production_release_id;
+
+# handle alias passed from command line
+if ($BranchFrom eq 'dev' || !$BranchFrom) {
+	$BranchFrom = $current_release_id;
+}
+elsif ($BranchFrom eq 'prod') {
+	$BranchFrom = $production_release_id;
+}
+
+# create the issue if we've specified the right parameters
+if ($CreateIssue) {
+    # invoke the editors if these weren't specified on the command line
+    # and die if the messages were left blank by the user
+	
+	$CreateIssue_Params->{summary} ||= Sandbox->get_create_issue_message('Summary');
+	if ($CreateIssueInteractive) {
+		$CreateIssue_Params->{issue_type} ||= Sandbox->get_value_from_list(
+			'Issue type?',
+		    Sandbox->issue_types,
+			'Bug'
+		);
+		$CreateIssue_Params->{priority} ||= Sandbox->get_value_from_list(
+			'Priority?',
+			Sandbox->issue_priorities,
+			'Minor'
+		);
+		$CreateIssue_Params->{affects_version} ||= Sandbox->get_value_from_list(
+			'Affects version?',
+			Sandbox->issue_affects_versions, 
+			$production_release_id
+		);
+		$CreateIssue_Params->{fix_version} ||= Sandbox->get_value_from_list(
+			'Fix in version?',
+		    Sandbox->issue_fix_versions,
+			$current_release_id
+		);
+		$CreateIssue_Params->{component} ||= Sandbox->get_value_from_list(
+			'Component?',
+		    Sandbox->issue_components
+		);
+	}
+	$CreateIssue_Params->{description} ||= Sandbox->get_create_issue_message('Description', $CreateIssue_Params->{summary});
+
+    # create the issue
+    my $created_issue = Sandbox->create_issue($CreateIssue_Params);
+    $Branch = $created_issue->key;
+    die "Problem creating issue!" unless Sandbox->is_issue_system_tracked_branch($Branch);
+}
+
+# lookup the issue in JIRA
+my $issue = $Branch =~ m{^$Sandbox::Project-[0-9]+} ? Sandbox->jira_issue($Branch) : undef;
+
+if ($issue) {
+	# print out the description of the issue as sort of a sanity check for the developer
+	print $issue->pretty;
+
+	# don't allow branching on issues that are verified, resolved or closed. We need to keep things reasonably in sync
+	if (($issue->status eq 'Verified' || $issue->status eq 'Resolved' || $issue->status eq 'Closed') && !$ForceOpen) {
+		die "$Branch is marked as ". lc($issue->status) . ".\nPlease reopen the issue before creating a branch or use the -F parameter.";
+	}
+}
+
+# update the branches in case something has been created in between pulls
+Sandbox->print_and_run('git', 'fetch', 'origin');
+# switch to branch we want to work from
+Sandbox->print_and_run('git', 'checkout', $BranchFrom);
+# make sure we have the latest and greatest from the master respository
+Sandbox->print_and_run('git', 'pull', 'origin', $BranchFrom);
+
+# If no Branch was specified the user wants to operate directly on the current
+# branch.  Exit.
+exit(0) unless $Branch;
+
+# make a nice name for the branch if this is a hotfix
+if ($BranchFrom eq $production_release_id) {
+    $Branch .= "-$BranchFrom-hotfix";
+}
+
+# create a branch only if the branch hasn't been created yet
+`git show-ref --tags --quiet --verify -- "refs/heads/$Branch"`;
+if ($?) { 
+    # make our branch
+    Sandbox->print_and_run('git', 'branch', $Branch);
+}
+
+# switch to the target branch
+Sandbox->print_and_run('git', 'checkout', $Branch);
+
+# set up remote config for the branch (so push/pull work out of the box)
+`git config branch.$Branch.remote origin`;
+`git config branch.$Branch.merge refs/heads/$Branch`;
